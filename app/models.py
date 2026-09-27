@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date as dt_date
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -139,3 +140,47 @@ class CustodyEventError(BaseModel):
 class CustodyAuditResponse(BaseModel):
     items: list[CustodyItem]  # 按 GTIN、序列号排序
     errors: list[CustodyEventError]  # 按原始下标排序
+
+
+# ---------- 包装关系审计 (/v1/packing/audit) ----------
+
+
+class PackingOperation(BaseModel):
+    """单条装入 / 取出操作:动作 + 父件扫描串 + 子件扫描串。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["pack", "unpack"]
+    parent_scan: str
+    child_scan: str
+
+
+class PackingAuditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operations: list[PackingOperation] = Field(min_length=1, max_length=300)
+
+
+class PackingItemRef(BaseModel):
+    """实物引用:GTIN + AI 21 序列号。"""
+
+    gtin: str
+    serial: str
+
+
+class PackingItem(BaseModel):
+    gtin: str
+    serial: str
+    parent: PackingItemRef | None  # 直接父件;无父件为 null
+    children: list[PackingItemRef]  # 直接子件,按 GTIN、序列号排序
+    outermost: PackingItemRef  # 最外层容器;无父件时为自身
+
+
+class PackingOperationError(BaseModel):
+    index: int  # 失败操作的原始下标
+    reason: str
+
+
+class PackingAuditResponse(BaseModel):
+    items: list[PackingItem]  # 成功操作涉及的实物,按 GTIN、序列号排序
+    errors: list[PackingOperationError]  # 按原始下标排序

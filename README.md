@@ -1,9 +1,10 @@
 # GS1 扫码核验 API
 
-基于 FastAPI 的 GS1 条码解析服务,提供两个接口:
+基于 FastAPI 的 GS1 条码解析服务,提供三个接口:
 
 - **召回核验**:上传一批扫描串和一批召回规则,逐条返回解析出的字段(GTIN / 批号 / 序列号 / 日期)以及命中的规则 ID。
 - **交接审计**:上传一批实物交接事件,按时间重放并审计每件实物(GTIN + 序列号)的持有人流转,返回成功事件与失败原因。
+- **包装审计**:上传一批装入 / 取出操作,按输入顺序执行并审计每件实物(GTIN + 序列号)的包装关系,返回直接父件、直接子件与最外层容器。
 
 ## 快速启动
 
@@ -15,6 +16,7 @@ docker compose up --build
 
 - 召回核验:`POST http://localhost:8000/v1/recall/check`
 - 交接审计:`POST http://localhost:8000/v1/custody/audit`
+- 包装审计:`POST http://localhost:8000/v1/packing/audit`
 - 交互文档:`http://localhost:8000/docs`
 - 健康检查:`GET http://localhost:8000/healthz`
 
@@ -184,6 +186,83 @@ curl -s http://localhost:8000/v1/custody/audit \
   }'
 ```
 
+### `POST /v1/packing/audit`
+
+审计一批装入 / 取出操作:**按输入顺序**逐条执行,维护每件实物(**GTIN + AI 21 序列号**)之间的直接父子关系,返回成功操作涉及实物的最终包装关系与失败操作的原因。
+
+请求体:
+
+| 字段 | 类型 | 约束 |
+| --- | --- | --- |
+| `operations` | `object[]` | 1~300 条操作,按输入顺序执行 |
+
+操作字段:
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `action` | 是 | `pack`(装入)或 `unpack`(取出) |
+| `parent_scan` | 是 | 父件 GS1 扫描串,语法同召回核验;须含 AI 01 与 AI 21(序列号) |
+| `child_scan` | 是 | 子件 GS1 扫描串,要求同上 |
+
+处理规则:
+
+1. 两端扫描串复用 GS1 解析,以 **GTIN + AI 21 序列号**识别实物(批号 / 有效期不参与识别);扫描非法或缺少序列号的操作按原下标报错,不执行。
+2. **装入**:子件须**尚无父件**,且不能是父件本身或父件的祖先(防止循环嵌套)。
+3. **取出**:指定的父件须为子件**当前的直接父件**。
+4. 只有成功操作改变包装关系;失败操作不影响后续操作的判定基准,后续操作继续处理。
+
+响应:
+
+```json
+{
+  "items": [
+    {
+      "gtin": "09506001123454",
+      "serial": "SN9",
+      "parent": { "gtin": "09506001123461", "serial": "CASE1" },
+      "children": [],
+      "outermost": { "gtin": "09506001123478", "serial": "PALLET1" }
+    },
+    {
+      "gtin": "09506001123461",
+      "serial": "CASE1",
+      "parent": { "gtin": "09506001123478", "serial": "PALLET1" },
+      "children": [{ "gtin": "09506001123454", "serial": "SN9" }],
+      "outermost": { "gtin": "09506001123478", "serial": "PALLET1" }
+    },
+    {
+      "gtin": "09506001123478",
+      "serial": "PALLET1",
+      "parent": null,
+      "children": [{ "gtin": "09506001123461", "serial": "CASE1" }],
+      "outermost": { "gtin": "09506001123478", "serial": "PALLET1" }
+    }
+  ],
+  "errors": [
+    { "index": 3, "reason": "子件当前直接父件为 (GTIN '09506001123461',序列号 'CASE1'),与指定父件不符" }
+  ]
+}
+```
+
+- `items` 为**成功操作涉及的全部实物**,按 **GTIN、序列号**排序;`parent` 为直接父件(无父件为 `null`),`children` 为直接子件(按同样顺序排列),`outermost` 为最外层容器(**无父件时为自身**)。
+- `errors` 按**原始下标**排序,`reason` 说明失败原因(扫描非法、缺少序列号、子件已有父件、子件是父件本身 / 祖先、子件无父件、指定父件不符)。
+- 请求体不合法(操作数量超限、`action` 非法、字段缺失或多余等)时整个请求返回 **422**。
+
+示例:
+
+```bash
+curl -s http://localhost:8000/v1/packing/audit \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "operations": [
+      {"action": "pack", "parent_scan": "010950600112346121CASE1",
+       "child_scan": "01095060011234541725123110LOT1\u001d21SN9"},
+      {"action": "pack", "parent_scan": "010950600112347821PALLET1",
+       "child_scan": "010950600112346121CASE1"}
+    ]
+  }'
+```
+
 ## 项目结构
 
 ```
@@ -193,9 +272,11 @@ app/
   models.py   # 请求 / 响应模型与规则校验
   matcher.py  # 召回规则匹配
   custody.py  # 实物交接审计(按时间重放事件,维护持有人)
+  packing.py  # 包装关系审计(按输入顺序执行装入 / 取出,维护父子关系)
 tests/
   test_recall.py
   test_custody.py
+  test_packing.py
 Dockerfile
 docker-compose.yml
 requirements.txt
