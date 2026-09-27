@@ -12,15 +12,18 @@ from .models import (
     CheckResponse,
     CustodyAuditRequest,
     CustodyAuditResponse,
+    PackingAuditRequest,
+    PackingAuditResponse,
     ScanErrorBody,
     ScanFields,
     ScanResult,
 )
+from .packing import audit_packing
 
 app = FastAPI(
     title="GS1 扫码核验 API",
-    version="1.1.0",
-    summary="解析 GS1 扫描串(AI 01/10/17/21):逐条匹配召回规则,并按时间重放实物交接事件",
+    version="1.2.0",
+    summary="解析 GS1 扫描串(AI 01/10/17/21):召回规则匹配、实物交接重放与装拆包装审计",
 )
 
 
@@ -65,3 +68,9 @@ def recall_check(request: CheckRequest) -> CheckResponse:
 def custody_audit(request: CustodyAuditRequest) -> CustodyAuditResponse:
     """按时间(UTC 升序)重放交接事件,审计每件实物(GTIN+序列号)的持有人流转。"""
     return audit_custody(request)
+
+
+@app.post("/v1/packing/audit", response_model=PackingAuditResponse, tags=["packing"])
+def packing_audit(request: PackingAuditRequest) -> PackingAuditResponse:
+    """按输入顺序重放装入/取出操作,审计实物(GTIN+序列号)间的直接包装关系。"""
+    return audit_packing(request)
